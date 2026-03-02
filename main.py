@@ -1,0 +1,255 @@
+from __future__ import annotations
+
+import math
+from pathlib import Path
+
+import moderngl
+import moderngl_window as mglw
+import numpy as np
+
+
+def normalize(v: np.ndarray) -> np.ndarray:
+    length = float(np.linalg.norm(v))
+    if length < 1e-8:
+        return v
+    return v / length
+
+
+class BlackHoleSim(mglw.WindowConfig):
+    gl_version = (3, 3)
+    title = "Black Hole Sim (GPU Raytracing)"
+    window_size = (1600, 900)
+    resizable = True
+    aspect_ratio = None
+    vsync = True
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+
+        shader_dir = Path(__file__).resolve().parent / "shaders"
+        self.program = self.ctx.program(
+            vertex_shader=(shader_dir / "fullscreen.vert").read_text(encoding="utf-8"),
+            fragment_shader=(shader_dir / "blackhole.frag").read_text(encoding="utf-8"),
+        )
+        self.quad = self.ctx.vertex_array(self.program, [])
+
+        self.target = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        self.yaw = math.radians(215.0)
+        self.pitch = math.radians(-6.0)
+        self.radius = 16.0
+        self.zoom_reference_radius = self.radius
+        self.fov_y = math.radians(55.0)
+
+        self.black_hole_radius = 1.0
+        self.disk_inner_radius = 1.65
+        self.disk_outer_radius = 7.25
+        self.exposure = 1.3
+        self.far_distance = 2200.0
+        self.zoom_far_distance_scale = 34.0
+        self.max_ray_steps_cap = 3072
+        self.show_grid = True
+        self.grid_height = -2.9
+        self.grid_depth = 7.8
+        self.grid_extent = 52.0
+        self.grid_spacing = 1.6
+        self.grid_line_width = 0.055
+        self.grid_glow = 2.15
+
+        self._time = 0.0
+        self._paused = False
+
+        self.quality_presets = {
+            "1": {"name": "performance", "step_size": 0.08, "max_steps": 600},
+            "2": {"name": "balanced", "step_size": 0.06, "max_steps": 760},
+            "3": {"name": "cinematic", "step_size": 0.045, "max_steps": 960},
+        }
+        self._set_quality("2")
+
+        keys = self.wnd.keys
+        print("Controls:")
+        print("  Left mouse drag: orbit camera")
+        print("  Mouse wheel: zoom")
+        print("  1/2/3: quality preset")
+        print("  G: toggle gravity well grid")
+        print("  Space: pause time")
+        print(f"  Esc: quit ({keys.ESCAPE})")
+
+    def _is_action_press(self, action: object) -> bool:
+        keys = self.wnd.keys
+        press = getattr(keys, "ACTION_PRESS", None)
+        if action == press:
+            return True
+        if str(action).upper() == "ACTION_PRESS":
+            return True
+        try:
+            return int(action) == 1
+        except (TypeError, ValueError):
+            return False
+
+    def _key_candidates(self, *names: str, fallback: int | None = None) -> tuple[object, ...]:
+        keys = self.wnd.keys
+        out: list[object] = []
+        for name in names:
+            value = getattr(keys, name, None)
+            if value is None or value == "undefined":
+                continue
+            out.append(value)
+        if fallback is not None:
+            out.append(fallback)
+        return tuple(out)
+
+    def _set_quality(self, level: str) -> None:
+        preset = self.quality_presets[level]
+        self.step_size = float(preset["step_size"])
+        self.max_steps = int(preset["max_steps"])
+        self.quality_name = str(preset["name"])
+        print(
+            f"Quality preset: {self.quality_name} "
+            f"(step_size={self.step_size}, max_steps={self.max_steps})"
+        )
+
+    def _distance_budget(self) -> tuple[float, int]:
+        base_far = self.far_distance
+        ref_radius = max(self.zoom_reference_radius, 1e-6)
+        extra_radius = max(0.0, self.radius - ref_radius)
+        dynamic_far = base_far + extra_radius * self.zoom_far_distance_scale
+
+        far_ratio = dynamic_far / base_far if base_far > 1e-6 else 1.0
+        dynamic_max_steps = int(
+            np.clip(
+                math.ceil(self.max_steps * far_ratio),
+                self.max_steps,
+                self.max_ray_steps_cap,
+            )
+        )
+        return dynamic_far, dynamic_max_steps
+
+    def _camera_vectors(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        cp = math.cos(self.pitch)
+        sp = math.sin(self.pitch)
+        cy = math.cos(self.yaw)
+        sy = math.sin(self.yaw)
+
+        camera_pos = np.array(
+            [
+                self.target[0] + self.radius * cp * cy,
+                self.target[1] + self.radius * sp,
+                self.target[2] + self.radius * cp * sy,
+            ],
+            dtype=np.float32,
+        )
+
+        forward = normalize(self.target - camera_pos)
+        world_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        right = normalize(np.cross(forward, world_up))
+        if float(np.linalg.norm(right)) < 1e-6:
+            right = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        up = normalize(np.cross(right, forward))
+        return camera_pos, forward, right, up
+
+    def on_render(self, time: float, frame_time: float) -> None:
+        if not self._paused:
+            self._time += frame_time
+
+        camera_pos, forward, right, up = self._camera_vectors()
+
+        width, height = self.wnd.buffer_size
+        if width <= 0 or height <= 0:
+            return
+        self.ctx.viewport = (0, 0, width, height)
+        self.ctx.disable(moderngl.DEPTH_TEST)
+
+        self.program["u_resolution"].value = (float(width), float(height))
+        self.program["u_time"].value = self._time
+        self.program["u_cam_pos"].value = tuple(float(v) for v in camera_pos)
+        self.program["u_cam_forward"].value = tuple(float(v) for v in forward)
+        self.program["u_cam_right"].value = tuple(float(v) for v in right)
+        self.program["u_cam_up"].value = tuple(float(v) for v in up)
+        self.program["u_fov_y"].value = self.fov_y
+        self.program["u_black_hole_radius"].value = self.black_hole_radius
+        self.program["u_disk_inner_radius"].value = self.disk_inner_radius
+        self.program["u_disk_outer_radius"].value = self.disk_outer_radius
+
+        self.program["u_step_size"].value = self.step_size
+        far_distance, max_steps = self._distance_budget()
+        self.program["u_max_steps"].value = max_steps
+        self.program["u_exposure"].value = self.exposure
+        self.program["u_far_distance"].value = far_distance
+        self.program["u_show_grid"].value = int(self.show_grid)
+        self.program["u_grid_height"].value = self.grid_height
+        self.program["u_grid_depth"].value = self.grid_depth
+        self.program["u_grid_extent"].value = self.grid_extent
+        self.program["u_grid_spacing"].value = self.grid_spacing
+        self.program["u_grid_line_width"].value = self.grid_line_width
+        self.program["u_grid_glow"].value = self.grid_glow
+
+        self.quad.render(mode=moderngl.TRIANGLES, vertices=3)
+
+    # Compatibility for versions that still call render() directly.
+    def render(self, time: float, frame_time: float) -> None:
+        self.on_render(time, frame_time)
+
+    def on_mouse_drag_event(self, x: int, y: int, dx: int, dy: int, *extra: object) -> None:
+        del extra
+        del x, y
+        sensitivity = 0.0038
+        self.yaw += dx * sensitivity
+        self.pitch = float(
+            np.clip(self.pitch - dy * sensitivity, -math.radians(88.0), math.radians(88.0))
+        )
+
+    def on_mouse_scroll_event(
+        self, x_offset: float, y_offset: float, *extra: object
+    ) -> None:
+        del extra
+        del x_offset
+        zoom_scale = math.exp(-y_offset * 0.12)
+        self.radius = float(np.clip(self.radius * zoom_scale, 3.0, 180.0))
+
+    def on_key_event(self, key: object, action: object, modifiers: object, *extra: object) -> None:
+        del extra
+        del modifiers
+        if not self._is_action_press(action):
+            return
+
+        esc_keys = self._key_candidates("ESCAPE")
+        if key in esc_keys:
+            self.wnd.close()
+            return
+
+        space_keys = self._key_candidates("SPACE", fallback=32)
+        if key in space_keys:
+            self._paused = not self._paused
+            print("Time paused" if self._paused else "Time running")
+            return
+
+        g_keys = self._key_candidates("G", fallback=ord("g"))
+        if key in g_keys:
+            self.show_grid = not self.show_grid
+            print("Gravity grid enabled" if self.show_grid else "Gravity grid disabled")
+            return
+
+        num1_keys = self._key_candidates("NUMBER_1", "NUMPAD_1", fallback=49)
+        num2_keys = self._key_candidates("NUMBER_2", "NUMPAD_2", fallback=50)
+        num3_keys = self._key_candidates("NUMBER_3", "NUMPAD_3", fallback=51)
+
+        if key in num1_keys:
+            self._set_quality("1")
+        elif key in num2_keys:
+            self._set_quality("2")
+        elif key in num3_keys:
+            self._set_quality("3")
+
+    # Backward-compatibility wrappers for older moderngl-window callback names.
+    def mouse_drag_event(self, x: int, y: int, dx: int, dy: int) -> None:
+        self.on_mouse_drag_event(x, y, dx, dy)
+
+    def mouse_scroll_event(self, x_offset: float, y_offset: float) -> None:
+        self.on_mouse_scroll_event(x_offset, y_offset)
+
+    def key_event(self, key: int, action: int, modifiers: int) -> None:
+        self.on_key_event(key, action, modifiers)
+
+
+if __name__ == "__main__":
+    mglw.run_window_config(BlackHoleSim)
