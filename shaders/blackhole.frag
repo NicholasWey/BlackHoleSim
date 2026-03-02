@@ -12,6 +12,7 @@ uniform vec3 u_cam_up;
 uniform float u_fov_y;
 
 uniform float u_black_hole_radius;
+uniform float u_black_hole_spin;
 uniform float u_disk_inner_radius;
 uniform float u_disk_outer_radius;
 uniform float u_disk_half_thickness;
@@ -194,7 +195,20 @@ vec3 geodesic_accel(vec3 p, vec3 d, float rs) {
     float h2 = dot(L, L);
     float inv_r = 1.0 / max(r, 1e-4);
     float inv_r5 = inv_r * inv_r * inv_r * inv_r * inv_r;
-    return -1.5 * rs * h2 * inv_r5 * p;
+    vec3 accel = -1.5 * rs * h2 * inv_r5 * p;
+
+    // Lightweight Kerr-inspired frame dragging term for spinning mode.
+    float spin = u_black_hole_spin;
+    if (abs(spin) > 1e-5) {
+        vec3 spin_axis = vec3(0.0, 1.0, 0.0);
+        float inv_r3 = inv_r * inv_r * inv_r;
+        vec3 j = spin_axis * (spin * rs * rs);
+        vec3 r_hat = p * inv_r;
+        vec3 b = (3.0 * r_hat * dot(j, r_hat) - j) * inv_r3;
+        accel += 2.6 * cross(d, b);
+    }
+
+    return accel;
 }
 
 float adaptive_step_size(float r, float rs) {

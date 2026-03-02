@@ -41,6 +41,8 @@ class BlackHoleSim(mglw.WindowConfig):
         self.fov_y = math.radians(55.0)
 
         self.black_hole_radius = 1.0
+        self.spinning_mode = False
+        self.black_hole_spin = 0.50
         self.disk_inner_radius = 1.65
         self.disk_outer_radius = 7.25
         self.disk_half_thickness = 0.2
@@ -60,7 +62,7 @@ class BlackHoleSim(mglw.WindowConfig):
         self.sun_color = np.array([1.0, 0.14, 0.06], dtype=np.float32)
         self.sun_intensity = 18.0
         self.voxel_mode = False
-        self.voxel_size = 1.05
+        self.voxel_size = 0.2
 
         self._time = 0.0
         self._paused = False
@@ -77,6 +79,7 @@ class BlackHoleSim(mglw.WindowConfig):
         print("  Left mouse drag: orbit camera")
         print("  Mouse wheel: zoom")
         print("  1/2/3: quality preset")
+        print("  B: toggle spinning black hole mode")
         print("  G: toggle gravity well grid")
         print("  V: toggle voxel mode")
         print("  Space: pause time")
@@ -178,6 +181,9 @@ class BlackHoleSim(mglw.WindowConfig):
         self.program["u_cam_up"].value = tuple(float(v) for v in up)
         self.program["u_fov_y"].value = self.fov_y
         self.program["u_black_hole_radius"].value = self.black_hole_radius
+        self.program["u_black_hole_spin"].value = (
+            self.black_hole_spin if self.spinning_mode else 0.0
+        )
         self.program["u_disk_inner_radius"].value = self.disk_inner_radius
         self.program["u_disk_outer_radius"].value = self.disk_outer_radius
         self.program["u_disk_half_thickness"].value = self.disk_half_thickness
@@ -245,6 +251,16 @@ class BlackHoleSim(mglw.WindowConfig):
         if key in g_keys:
             self.show_grid = not self.show_grid
             print("Gravity grid enabled" if self.show_grid else "Gravity grid disabled")
+            return
+
+        b_keys = self._key_candidates("B", fallback=ord("b"))
+        if key in b_keys:
+            self.spinning_mode = not self.spinning_mode
+            print(
+                "Black hole mode: spinning"
+                if self.spinning_mode
+                else "Black hole mode: static"
+            )
             return
 
         v_keys = self._key_candidates("V", fallback=ord("v"))

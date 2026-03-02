@@ -7,6 +7,7 @@ This project runs the ray integration on the GPU in a fragment shader, so your R
 ## Physics Model
 
 - Metric: Schwarzschild (non-rotating black hole)
+- Optional spin mode: Kerr-inspired frame-dragging approximation (toggle at runtime)
 - Units: `G = c = 1`, with configurable Schwarzschild radius `r_s`
 - Light paths: numerically integrated null geodesic approximation in 3D
 - Accretion disk:
@@ -48,6 +49,7 @@ python main.py
 - `2`: balanced preset (default)
 - `3`: cinematic preset (more integration steps)
 - `G`: toggle the gravity-well grid
+- `B`: toggle static/spinning black hole mode
 - `V`: toggle voxel mode
 - `Space`: pause/resume simulation time
 - `Esc`: quit
