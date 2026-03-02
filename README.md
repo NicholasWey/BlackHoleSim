@@ -48,6 +48,7 @@ python main.py
 - `2`: balanced preset (default)
 - `3`: cinematic preset (more integration steps)
 - `G`: toggle the gravity-well grid
+- `V`: toggle voxel mode
 - `Space`: pause/resume simulation time
 - `Esc`: quit
 

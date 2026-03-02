@@ -14,6 +14,7 @@ uniform float u_fov_y;
 uniform float u_black_hole_radius;
 uniform float u_disk_inner_radius;
 uniform float u_disk_outer_radius;
+uniform float u_disk_half_thickness;
 uniform float u_step_size;
 uniform int u_max_steps;
 uniform float u_exposure;
@@ -25,6 +26,12 @@ uniform float u_grid_extent;
 uniform float u_grid_spacing;
 uniform float u_grid_line_width;
 uniform float u_grid_glow;
+uniform vec3 u_sun_position;
+uniform float u_sun_radius;
+uniform vec3 u_sun_color;
+uniform float u_sun_intensity;
+uniform int u_voxel_mode;
+uniform float u_voxel_size;
 
 const float PI = 3.14159265359;
 const int MAX_STEPS = 4096;
@@ -48,25 +55,92 @@ float value_noise(vec2 p) {
     return mix(x0, x1, f.y);
 }
 
-vec3 starfield(vec3 dir) {
-    vec3 d = normalize(dir);
-    vec2 uv = vec2(
-        atan(d.z, d.x) / (2.0 * PI) + 0.5,
-        asin(clamp(d.y, -1.0, 1.0)) / PI + 0.5
-    );
+float voxel_cell_size() {
+    return max(u_voxel_size, 0.08);
+}
 
-    // Quantize to pixel-scale sky cells so stars stay tiny.
-    vec2 star_cell = floor(uv * u_resolution);
-    float seed = hash21(star_cell);
-    float star = step(0.9992, seed);
+vec2 voxel_snap2(vec2 p) {
+    float s = voxel_cell_size();
+    return floor(p / s + 0.5) * s;
+}
 
-    float twinkle_phase = hash21(star_cell + 23.7) * 40.0;
-    float twinkle_speed = 4.0 + 10.0 * hash21(star_cell + 91.1);
-    float twinkle = 0.9 + 0.1 * sin(u_time * twinkle_speed + twinkle_phase);
+vec3 voxel_snap3(vec3 p) {
+    float s = voxel_cell_size();
+    return floor(p / s + 0.5) * s;
+}
 
-    float bright = step(0.99993, hash21(star_cell + 177.3));
-    float intensity = star * (1.25 * twinkle + bright * 2.25);
-    return vec3(intensity);
+vec3 voxel_palette(vec3 c, float levels) {
+    float lv = max(levels, 2.0);
+    return floor(c * lv + 0.5) / lv;
+}
+
+vec3 voxel_normal(vec3 n) {
+    vec3 a = abs(n);
+    if (a.x >= a.y && a.x >= a.z) {
+        return vec3(sign(n.x), 0.0, 0.0);
+    }
+    if (a.y >= a.x && a.y >= a.z) {
+        return vec3(0.0, sign(n.y), 0.0);
+    }
+    return vec3(0.0, 0.0, sign(n.z));
+}
+
+bool intersect_sphere_segment(vec3 p0, vec3 p1, vec3 center, float radius, out float t_hit) {
+    vec3 seg = p1 - p0;
+    vec3 oc = p0 - center;
+    float a = dot(seg, seg);
+    if (a <= 1e-8) {
+        return false;
+    }
+    float b = 2.0 * dot(oc, seg);
+    float c = dot(oc, oc) - radius * radius;
+    float disc = b * b - 4.0 * a * c;
+    if (disc < 0.0) {
+        return false;
+    }
+
+    float s = sqrt(disc);
+    float inv_2a = 0.5 / a;
+    float t0 = (-b - s) * inv_2a;
+    float t1 = (-b + s) * inv_2a;
+
+    float t = 2.0;
+    if (t0 >= 0.0 && t0 <= 1.0) {
+        t = t0;
+    } else if (t1 >= 0.0 && t1 <= 1.0) {
+        t = t1;
+    }
+    if (t > 1.0) {
+        return false;
+    }
+    t_hit = t;
+    return true;
+}
+
+vec3 sun_emission(vec3 hit_pos) {
+    vec3 sample_hit = hit_pos;
+    if (u_voxel_mode == 1) {
+        sample_hit = u_sun_position + voxel_snap3(hit_pos - u_sun_position);
+    }
+
+    vec3 delta = sample_hit - u_sun_position;
+    if (dot(delta, delta) < 1e-8) {
+        delta = vec3(0.0, 1.0, 0.0);
+    }
+    vec3 n = normalize(delta);
+    if (u_voxel_mode == 1) {
+        n = voxel_normal(n);
+    }
+
+    float gran_scale = u_voxel_mode == 1 ? 9.0 : 18.0;
+    float gran = value_noise(n.xz * gran_scale + n.y * (gran_scale * 0.6));
+    vec3 core = mix(vec3(1.0, 0.82, 0.56), u_sun_color, 0.78);
+    vec3 surface = core * (0.95 + 0.10 * gran);
+    vec3 col = surface * u_sun_intensity;
+    if (u_voxel_mode == 1) {
+        col = voxel_palette(col, 7.0);
+    }
+    return col;
 }
 
 float disk_grain(vec2 xz) {
@@ -77,7 +151,12 @@ float disk_grain(vec2 xz) {
 }
 
 vec3 disk_emission(vec3 hit_pos, vec3 view_dir, float rs) {
-    float r = length(hit_pos.xz);
+    vec3 sample_hit = hit_pos;
+    if (u_voxel_mode == 1) {
+        sample_hit = voxel_snap3(hit_pos);
+    }
+
+    float r = length(sample_hit.xz);
     float t = clamp((r - u_disk_inner_radius) / (u_disk_outer_radius - u_disk_inner_radius), 0.0, 1.0);
 
     vec3 hot = vec3(1.0, 0.94, 0.84);
@@ -86,11 +165,14 @@ vec3 disk_emission(vec3 hit_pos, vec3 view_dir, float rs) {
     vec3 base_col = mix(hot, warm, smoothstep(0.0, 0.36, t));
     base_col = mix(base_col, cool, smoothstep(0.36, 1.0, t));
 
-    float grain = disk_grain(hit_pos.xz);
-    float emissive = mix(3.6, 0.55, t) * (0.92 + 0.16 * grain);
+    float grain = disk_grain(sample_hit.xz);
+    float h = max(u_disk_half_thickness, 1e-4);
+    float y_norm = abs(sample_hit.y) / h;
+    float vertical = exp(-2.6 * y_norm * y_norm);
+    float emissive = mix(3.6, 0.55, t) * (0.92 + 0.16 * grain) * vertical;
 
     float beta = sqrt(clamp(rs / (2.0 * max(r, rs * 1.02)), 0.0, 0.35));
-    vec3 tangent = normalize(vec3(-hit_pos.z, 0.0, hit_pos.x));
+    vec3 tangent = normalize(vec3(-sample_hit.z, 0.0, sample_hit.x));
     vec3 vel = tangent * beta;
     float gamma = inversesqrt(max(1e-4, 1.0 - dot(vel, vel)));
     float doppler = 1.0 / (gamma * (1.0 - dot(vel, -view_dir)));
@@ -99,7 +181,11 @@ vec3 disk_emission(vec3 hit_pos, vec3 view_dir, float rs) {
     float grav = sqrt(max(0.015, 1.0 - rs / max(r, rs * 1.01)));
     float gain = emissive * grav * pow(doppler, 3.0);
 
-    return base_col * gain;
+    vec3 col = base_col * gain;
+    if (u_voxel_mode == 1) {
+        col = voxel_palette(col, 6.0);
+    }
+    return col;
 }
 
 vec3 geodesic_accel(vec3 p, vec3 d, float rs) {
@@ -119,12 +205,22 @@ float adaptive_step_size(float r, float rs) {
 }
 
 float well_surface_y(vec2 xz, float rs) {
-    float r = length(xz);
+    vec2 eval_xz = xz;
+    if (u_voxel_mode == 1) {
+        eval_xz = voxel_snap2(eval_xz);
+    }
+
+    float r = length(eval_xz);
     float edge = max(u_grid_extent, rs * 2.5);
     float r_floor = rs * 1.08;
     float r_safe = max(r, r_floor);
     float depth = u_grid_depth * max(0.0, inversesqrt(r_safe + 0.35) - inversesqrt(edge + 0.35));
-    return u_grid_height - depth;
+    float y = u_grid_height - depth;
+    if (u_voxel_mode == 1) {
+        float y_step = max(0.08, voxel_cell_size() * 0.65);
+        y = floor(y / y_step + 0.5) * y_step;
+    }
+    return y;
 }
 
 float well_slope_dr(float r, float rs) {
@@ -137,6 +233,16 @@ float well_slope_dr(float r, float rs) {
 }
 
 vec3 well_normal(vec3 p, float rs) {
+    if (u_voxel_mode == 1) {
+        float eps = max(0.12, voxel_cell_size() * 0.6);
+        float yxp = well_surface_y(p.xz + vec2(eps, 0.0), rs);
+        float yxn = well_surface_y(p.xz - vec2(eps, 0.0), rs);
+        float yzp = well_surface_y(p.xz + vec2(0.0, eps), rs);
+        float yzn = well_surface_y(p.xz - vec2(0.0, eps), rs);
+        vec3 n = normalize(vec3(-(yxp - yxn), 2.0 * eps, -(yzp - yzn)));
+        return voxel_normal(n);
+    }
+
     float r = length(p.xz);
     float slope = well_slope_dr(r, rs);
     if (r < 1e-4 || slope <= 0.0) {
@@ -153,21 +259,34 @@ float square_grid(vec2 p, float spacing, float width) {
 }
 
 vec3 well_grid_emission(vec3 hit_pos, vec3 view_dir, float rs) {
-    float r = length(hit_pos.xz);
+    vec3 sample_hit = hit_pos;
+    if (u_voxel_mode == 1) {
+        sample_hit = voxel_snap3(hit_pos);
+        sample_hit.y = well_surface_y(sample_hit.xz, rs);
+    }
+
+    float r = length(sample_hit.xz);
     if (r <= rs * 1.08 || r >= u_grid_extent) {
         return vec3(0.0);
     }
 
     float spacing = max(0.1, u_grid_spacing);
     float width = max(0.012, u_grid_line_width);
+    if (u_voxel_mode == 1) {
+        spacing = max(spacing, voxel_cell_size() * 1.5);
+        width = max(width * 0.55, voxel_cell_size() * 0.055);
+    }
 
-    float minor = square_grid(hit_pos.xz, spacing, width);
-    float major = square_grid(hit_pos.xz, spacing * 5.0, width * 1.6);
+    float minor = square_grid(sample_hit.xz, spacing, width);
+    float major = square_grid(sample_hit.xz, spacing * 5.0, width * 1.6);
 
     float line = max(minor * 0.55, major * 1.25);
+    if (u_voxel_mode == 1) {
+        line = max(minor * 0.45, major * 0.90);
+    }
     line = clamp(line, 0.0, 1.0);
 
-    vec3 normal = well_normal(hit_pos, rs);
+    vec3 normal = well_normal(sample_hit, rs);
     vec3 light_dir = normalize(vec3(-0.4, 1.0, -0.28));
     float lambert = 0.22 + 0.78 * max(dot(normal, light_dir), 0.0);
     float rim = pow(clamp(1.0 - dot(normal, -view_dir), 0.0, 1.0), 2.0);
@@ -177,6 +296,9 @@ vec3 well_grid_emission(vec3 hit_pos, vec3 view_dir, float rs) {
     vec3 inner = vec3(0.24, 0.95, 1.0);
     vec3 outer = vec3(0.05, 0.22, 0.38);
     vec3 base_col = mix(inner, outer, smoothstep(rs * 1.4, u_grid_extent, r));
+    if (u_voxel_mode == 1) {
+        base_col = voxel_palette(base_col, 6.0);
+    }
 
     float intensity = u_grid_glow * line * lambert * (0.82 + 0.72 * rim) * horizon_fade * grav;
     return base_col * intensity;
@@ -244,18 +366,42 @@ vec3 trace_black_hole(vec3 origin, vec3 ray_dir) {
                 }
             }
 
-            bool crossed = (prev_pos.y <= 0.0 && pos.y > 0.0) || (prev_pos.y >= 0.0 && pos.y < 0.0);
-            if (crossed) {
-                float denom = prev_pos.y - pos.y;
-                float t = abs(denom) > 1e-5 ? prev_pos.y / denom : 0.0;
-                t = clamp(t, 0.0, 1.0);
-                vec3 hit = mix(prev_pos, pos, t);
+            float disk_h = max(u_disk_half_thickness, 1e-4);
+            float y0 = prev_pos.y;
+            float y1 = pos.y;
+            float dy = y1 - y0;
 
+            float t0 = 0.0;
+            float t1 = 1.0;
+            bool slab_hit = false;
+            if (abs(dy) < 1e-6) {
+                slab_hit = abs(y0) <= disk_h;
+            } else {
+                float ta = (-disk_h - y0) / dy;
+                float tb = (disk_h - y0) / dy;
+                t0 = max(0.0, min(ta, tb));
+                t1 = min(1.0, max(ta, tb));
+                slab_hit = t1 >= t0;
+            }
+
+            if (slab_hit) {
+                float t_mid = 0.5 * (t0 + t1);
+                vec3 hit = mix(prev_pos, pos, t_mid);
                 float disk_r = length(hit.xz);
                 if (disk_r > u_disk_inner_radius && disk_r < u_disk_outer_radius) {
+                    float seg_len = length(pos - prev_pos);
+                    float path_frac = max(0.0, t1 - t0);
+                    float volume_weight = clamp(path_frac * seg_len / max(disk_h * 0.75, 1e-4), 0.0, 1.4);
                     vec3 emit = disk_emission(hit, dir, rs);
-                    accum += emit;
+                    accum += emit * volume_weight;
                 }
+            }
+
+            float sun_t = 0.0;
+            if (intersect_sphere_segment(prev_pos, pos, u_sun_position, u_sun_radius, sun_t)) {
+                vec3 sun_hit = mix(prev_pos, pos, sun_t);
+                accum += sun_emission(sun_hit);
+                return accum;
             }
 
             if (length(pos) > u_far_distance) {
@@ -271,7 +417,6 @@ vec3 trace_black_hole(vec3 origin, vec3 ray_dir) {
         }
     }
 
-    accum += starfield(dir);
     return accum;
 }
 

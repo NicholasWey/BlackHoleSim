@@ -43,17 +43,24 @@ class BlackHoleSim(mglw.WindowConfig):
         self.black_hole_radius = 1.0
         self.disk_inner_radius = 1.65
         self.disk_outer_radius = 7.25
+        self.disk_half_thickness = 0.2
         self.exposure = 1.3
         self.far_distance = 2200.0
         self.zoom_far_distance_scale = 34.0
         self.max_ray_steps_cap = 3072
         self.show_grid = True
         self.grid_height = -2.9
-        self.grid_depth = 7.8
+        self.grid_depth = 20.0
         self.grid_extent = 52.0
         self.grid_spacing = 1.6
         self.grid_line_width = 0.055
         self.grid_glow = 2.15
+        self.sun_position = np.array([36.0, 4.0, 36.0], dtype=np.float32)
+        self.sun_radius = 4.8
+        self.sun_color = np.array([1.0, 0.14, 0.06], dtype=np.float32)
+        self.sun_intensity = 18.0
+        self.voxel_mode = False
+        self.voxel_size = 1.05
 
         self._time = 0.0
         self._paused = False
@@ -71,6 +78,7 @@ class BlackHoleSim(mglw.WindowConfig):
         print("  Mouse wheel: zoom")
         print("  1/2/3: quality preset")
         print("  G: toggle gravity well grid")
+        print("  V: toggle voxel mode")
         print("  Space: pause time")
         print(f"  Esc: quit ({keys.ESCAPE})")
 
@@ -160,7 +168,10 @@ class BlackHoleSim(mglw.WindowConfig):
         self.ctx.disable(moderngl.DEPTH_TEST)
 
         self.program["u_resolution"].value = (float(width), float(height))
-        self.program["u_time"].value = self._time
+        try:
+            self.program["u_time"].value = self._time
+        except KeyError:
+            pass
         self.program["u_cam_pos"].value = tuple(float(v) for v in camera_pos)
         self.program["u_cam_forward"].value = tuple(float(v) for v in forward)
         self.program["u_cam_right"].value = tuple(float(v) for v in right)
@@ -169,6 +180,7 @@ class BlackHoleSim(mglw.WindowConfig):
         self.program["u_black_hole_radius"].value = self.black_hole_radius
         self.program["u_disk_inner_radius"].value = self.disk_inner_radius
         self.program["u_disk_outer_radius"].value = self.disk_outer_radius
+        self.program["u_disk_half_thickness"].value = self.disk_half_thickness
 
         self.program["u_step_size"].value = self.step_size
         far_distance, max_steps = self._distance_budget()
@@ -182,6 +194,12 @@ class BlackHoleSim(mglw.WindowConfig):
         self.program["u_grid_spacing"].value = self.grid_spacing
         self.program["u_grid_line_width"].value = self.grid_line_width
         self.program["u_grid_glow"].value = self.grid_glow
+        self.program["u_sun_position"].value = tuple(float(v) for v in self.sun_position)
+        self.program["u_sun_radius"].value = self.sun_radius
+        self.program["u_sun_color"].value = tuple(float(v) for v in self.sun_color)
+        self.program["u_sun_intensity"].value = self.sun_intensity
+        self.program["u_voxel_mode"].value = int(self.voxel_mode)
+        self.program["u_voxel_size"].value = self.voxel_size
 
         self.quad.render(mode=moderngl.TRIANGLES, vertices=3)
 
@@ -227,6 +245,12 @@ class BlackHoleSim(mglw.WindowConfig):
         if key in g_keys:
             self.show_grid = not self.show_grid
             print("Gravity grid enabled" if self.show_grid else "Gravity grid disabled")
+            return
+
+        v_keys = self._key_candidates("V", fallback=ord("v"))
+        if key in v_keys:
+            self.voxel_mode = not self.voxel_mode
+            print("Voxel mode enabled" if self.voxel_mode else "Voxel mode disabled")
             return
 
         num1_keys = self._key_candidates("NUMBER_1", "NUMPAD_1", fallback=49)
