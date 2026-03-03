@@ -6,16 +6,16 @@ This project runs the ray integration on the GPU in a fragment shader, so your R
 
 ## Physics Model
 
-- Metric: Schwarzschild (non-rotating black hole)
-- Optional spin mode: Kerr-inspired frame-dragging approximation (toggle at runtime)
+- Metric: Schwarzschild + stable spin approximation by default
+- Optional full Kerr mode: experimental Kerr null geodesic tracing
 - Units: `G = c = 1`, with configurable Schwarzschild radius `r_s`
-- Light paths: numerically integrated null geodesic approximation in 3D
+- Light paths: stable real-time approximation by default, optional Kerr BL integration
 - Accretion disk:
   - thin disk in the equatorial plane
   - approximate orbital Doppler boosting
   - approximate gravitational redshift dimming
 
-This is physically grounded for visual simulation, but still a real-time approximation rather than a full GR solver.
+This is physically grounded for visual simulation; radiative and disk appearance terms are still real-time approximations.
 
 ## Hardware Fit (Your PC)
 
@@ -50,6 +50,7 @@ python main.py
 - `3`: cinematic preset (more integration steps)
 - `G`: toggle the gravity-well grid
 - `B`: toggle static/spinning black hole mode
+- `K`: toggle stable approximation / experimental full Kerr solver
 - `V`: toggle voxel mode
 - `Space`: pause/resume simulation time
 - `Esc`: quit

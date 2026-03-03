@@ -13,6 +13,7 @@ uniform float u_fov_y;
 
 uniform float u_black_hole_radius;
 uniform float u_black_hole_spin;
+uniform int u_use_full_kerr;
 uniform float u_disk_inner_radius;
 uniform float u_disk_outer_radius;
 uniform float u_disk_half_thickness;
@@ -364,7 +365,7 @@ vec3 geodesic_accel(vec3 p, vec3 d, float rs) {
     // Lightweight Kerr-inspired frame dragging term for spinning mode.
     float spin = u_black_hole_spin;
     if (abs(spin) > 1e-5) {
-        vec3 spin_axis = vec3(0.0, 1.0, 0.0);
+        vec3 spin_axis = vec3(1.0, 0.0, 0.0);
         float inv_r3 = inv_r * inv_r * inv_r;
         vec3 j = spin_axis * (spin * rs * rs);
         vec3 r_hat = p * inv_r;
@@ -482,7 +483,7 @@ vec3 well_grid_emission(vec3 hit_pos, vec3 view_dir, float rs) {
     return base_col * intensity;
 }
 
-vec3 trace_black_hole(vec3 origin, vec3 ray_dir) {
+vec3 trace_black_hole_approx(vec3 origin, vec3 ray_dir) {
     vec3 pos = origin;
     vec3 dir = normalize(ray_dir);
     vec3 accum = vec3(0.0);
@@ -594,6 +595,489 @@ vec3 trace_black_hole(vec3 origin, vec3 ray_dir) {
                 return accum;
             }
         }
+        if (stop_trace) {
+            break;
+        }
+    }
+
+    if (u_voxel_mode == 1) {
+        vec3 bg = space_background(dir);
+        float lens = 1.0 - smoothstep(rs * 2.0, rs * 10.0, closest_r);
+        lens = floor(lens * 5.0 + 0.5) / 5.0;
+
+        float ring_mix = clamp((closest_r - rs) / max(rs * 5.0, 1e-4), 0.0, 1.0);
+        ring_mix = floor(ring_mix * 5.0 + 0.5) / 5.0;
+        vec3 ring_tint = banded_pixel_color(1.0 - ring_mix * 0.90);
+
+        bg *= mix(1.0, 0.35, lens);
+        accum += bg;
+        accum += ring_tint * lens * 0.95;
+        return accum;
+    }
+
+    vec3 bg = space_background(dir);
+    float lens = 1.0 - smoothstep(rs * 2.0, rs * 11.0, closest_r);
+    float ring_mix = clamp((closest_r - rs) / max(rs * 5.0, 1e-4), 0.0, 1.0);
+    vec3 ring_tint = mix(vec3(1.0, 0.94, 0.88), vec3(1.0, 0.35, 0.72), ring_mix);
+    bg *= mix(1.0, 0.44, lens * 0.82);
+    accum += bg;
+    accum += ring_tint * pow(lens, 2.1) * 0.78;
+
+    return accum;
+}
+
+float safe_sin2(float theta) {
+    float s = sin(theta);
+    return max(s * s, 1e-6);
+}
+
+float kerr_horizon_radius(float rs, float a) {
+    float M = 0.5 * rs;
+    float a_clamped = clamp(abs(a), 0.0, max(M - 1e-6, 0.0));
+    return M + sqrt(max(M * M - a_clamped * a_clamped, 0.0));
+}
+
+vec3 world_to_kerr(vec3 p) {
+    // Rotate world frame so Kerr spin axis (local +Y) maps to world +X.
+    return vec3(p.z, p.x, p.y);
+}
+
+vec3 kerr_to_world(vec3 p) {
+    return vec3(p.y, p.z, p.x);
+}
+
+vec3 bl_to_cart_y_axis(float r, float theta, float phi, float a) {
+    float rr = max(r, 1e-4);
+    float th = clamp(theta, 1e-4, PI - 1e-4);
+    float A = sqrt(rr * rr + a * a);
+    float st = sin(th);
+    float cp = cos(phi);
+    float sp = sin(phi);
+    return vec3(A * st * cp, rr * cos(th), A * st * sp);
+}
+
+vec3 cart_to_bl_y_axis(vec3 p, float a) {
+    float r2_cart = dot(p, p);
+    float tmp = r2_cart - a * a;
+    float disc = sqrt(max(tmp * tmp + 4.0 * a * a * p.y * p.y, 0.0));
+    float r2 = max(0.5 * (tmp + disc), 1e-8);
+    float r = sqrt(r2);
+    float ct = clamp(p.y / max(r, 1e-6), -1.0, 1.0);
+    float theta = acos(ct);
+    float phi = atan(p.z, p.x);
+    return vec3(r, theta, phi);
+}
+
+void bl_basis_y_axis(
+    float r,
+    float theta,
+    float phi,
+    float a,
+    out vec3 e_r,
+    out vec3 e_theta,
+    out vec3 e_phi
+) {
+    float A = sqrt(r * r + a * a);
+    float st = sin(theta);
+    float ct = cos(theta);
+    float cp = cos(phi);
+    float sp = sin(phi);
+    float r_over_A = r / max(A, 1e-6);
+
+    e_r = vec3(r_over_A * st * cp, ct, r_over_A * st * sp);
+    e_theta = vec3(A * ct * cp, -r * st, A * ct * sp);
+    e_phi = vec3(-A * st * sp, 0.0, A * st * cp);
+}
+
+void kerr_metric_components(
+    float r,
+    float theta,
+    float rs,
+    float a,
+    out float Sigma,
+    out float Delta,
+    out float g_tt,
+    out float g_tphi,
+    out float g_rr,
+    out float g_thetatheta,
+    out float g_phiphi
+) {
+    float ct = cos(theta);
+    float st2 = safe_sin2(theta);
+
+    Sigma = max(r * r + a * a * ct * ct, 1e-6);
+    Delta = r * r - rs * r + a * a;
+
+    g_tt = -(1.0 - rs * r / Sigma);
+    g_tphi = -(rs * r * a * st2) / Sigma;
+    g_rr = Sigma / max(Delta, 1e-6);
+    g_thetatheta = Sigma;
+    g_phiphi = st2 * (r * r + a * a + (rs * r * a * a * st2) / Sigma);
+}
+
+bool init_kerr_ray(
+    vec3 origin,
+    vec3 ray_dir,
+    float rs,
+    float a,
+    out vec4 state,
+    out vec2 signs,
+    out float Lz,
+    out float Q
+) {
+    vec3 origin_kerr = world_to_kerr(origin);
+    vec3 dir_kerr = normalize(world_to_kerr(ray_dir));
+    vec3 bl = cart_to_bl_y_axis(origin_kerr, a);
+    float r = max(bl.x, 1e-4);
+    float theta = clamp(bl.y, 1e-4, PI - 1e-4);
+    float phi = bl.z;
+
+    vec3 e_r;
+    vec3 e_theta;
+    vec3 e_phi;
+    bl_basis_y_axis(r, theta, phi, a, e_r, e_theta, e_phi);
+
+    vec3 dir = normalize(dir_kerr);
+    vec3 u_r = normalize(e_r);
+    vec3 u_theta = normalize(e_theta);
+    vec3 u_phi = normalize(e_phi);
+    vec3 local_dir = vec3(dot(dir, u_r), dot(dir, u_theta), dot(dir, u_phi));
+    float local_len = length(local_dir);
+    if (local_len < 1e-6) {
+        return false;
+    }
+    local_dir /= local_len;
+    float n_r = local_dir.x;
+    float n_theta = local_dir.y;
+    float n_phi = local_dir.z;
+
+    float Sigma;
+    float Delta;
+    float g_tt;
+    float g_tphi;
+    float g_rr;
+    float g_thetatheta;
+    float g_phiphi;
+    kerr_metric_components(
+        r,
+        theta,
+        rs,
+        a,
+        Sigma,
+        Delta,
+        g_tt,
+        g_tphi,
+        g_rr,
+        g_thetatheta,
+        g_phiphi
+    );
+
+    float st2 = safe_sin2(theta);
+    float A_big = (r * r + a * a) * (r * r + a * a) - a * a * Delta * st2;
+    float A_safe = max(A_big, 1e-6);
+    float alpha = sqrt(max(Sigma * max(Delta, 1e-8) / A_safe, 1e-8));
+    float omega = (a * rs * r) / A_safe;
+
+    // Initialize photon 4-momentum in a local orthonormal frame (ZAMO-like).
+    float t_dot = 1.0 / alpha;
+    float r_dot = n_r * sqrt(max(Delta, 1e-8) / Sigma);
+    float theta_dot = n_theta / sqrt(max(Sigma, 1e-8));
+    float phi_dot = omega / alpha + n_phi * sqrt(max(Sigma / A_safe, 1e-8)) / sqrt(st2);
+
+    float p_t = g_tt * t_dot + g_tphi * phi_dot;
+    float E = -p_t;
+    if (E <= 1e-6) {
+        return false;
+    }
+
+    float inv_E = 1.0 / E;
+    r_dot *= inv_E;
+    theta_dot *= inv_E;
+    phi_dot *= inv_E;
+    t_dot *= inv_E;
+
+    Lz = g_tphi * t_dot + g_phiphi * phi_dot;
+
+    float ct = cos(theta);
+    float p_theta = g_thetatheta * theta_dot;
+    Q = p_theta * p_theta + ct * ct * (Lz * Lz / st2 - a * a);
+    // Numerical guard: tiny negative Carter values near the image midline can
+    // cause branch-flip seams and duplicated images.
+    Q = max(Q, 0.0);
+
+    float sign_r = r_dot >= 0.0 ? 1.0 : -1.0;
+    float sign_theta = theta_dot >= 0.0 ? 1.0 : -1.0;
+    if (abs(r_dot) < 1e-7) {
+        sign_r = 1.0;
+    }
+    if (abs(theta_dot) < 1e-7) {
+        sign_theta = 1.0;
+    }
+
+    state = vec4(r, theta, phi, 0.0);
+    signs = vec2(sign_r, sign_theta);
+    return true;
+}
+
+void kerr_invariants(
+    float r,
+    float theta,
+    float Lz,
+    float Q,
+    float rs,
+    float a,
+    out float Sigma,
+    out float Delta,
+    out float P,
+    out float R,
+    out float Theta
+) {
+    float ct = cos(theta);
+    float st2 = safe_sin2(theta);
+
+    Sigma = max(r * r + a * a * ct * ct, 1e-6);
+    Delta = r * r - rs * r + a * a;
+    P = r * r + a * a - a * Lz;
+
+    float radial_term = Q + (Lz - a) * (Lz - a);
+    R = P * P - Delta * radial_term;
+
+    Theta = Q + a * a * ct * ct - (Lz * Lz * ct * ct) / st2;
+}
+
+void kerr_derivatives(
+    vec4 state,
+    vec2 signs,
+    float Lz,
+    float Q,
+    float rs,
+    float a,
+    out vec4 deriv,
+    out float R,
+    out float Theta
+) {
+    float r = max(state.x, 1e-4);
+    float theta = clamp(state.y, 1e-4, PI - 1e-4);
+
+    float Sigma;
+    float Delta;
+    float P;
+    kerr_invariants(r, theta, Lz, Q, rs, a, Sigma, Delta, P, R, Theta);
+
+    float st2 = safe_sin2(theta);
+    float delta_safe = max(Delta, 1e-6);
+    float r_dot = signs.x * sqrt(max(R, 0.0)) / Sigma;
+    float theta_dot = signs.y * sqrt(max(Theta, 0.0)) / Sigma;
+    float phi_dot = (a * P / delta_safe + (Lz / st2 - a)) / Sigma;
+    float t_dot = (((r * r + a * a) * P) / delta_safe + a * (Lz - a * st2)) / Sigma;
+
+    deriv = vec4(r_dot, theta_dot, phi_dot, t_dot);
+}
+
+void advance_kerr_ray(
+    inout vec4 state,
+    inout vec2 signs,
+    float Lz,
+    float Q,
+    float rs,
+    float a,
+    float h
+) {
+    vec4 k1;
+    float R1;
+    float Theta1;
+    kerr_derivatives(state, signs, Lz, Q, rs, a, k1, R1, Theta1);
+
+    vec4 mid = state + 0.5 * h * k1;
+    mid.x = max(mid.x, 1e-4);
+    mid.y = clamp(mid.y, 1e-4, PI - 1e-4);
+
+    vec4 k2;
+    float R2;
+    float Theta2;
+    kerr_derivatives(mid, signs, Lz, Q, rs, a, k2, R2, Theta2);
+
+    state += h * k2;
+    state.x = max(state.x, 1e-4);
+    state.y = clamp(state.y, 1e-4, PI - 1e-4);
+    state.z = atan(sin(state.z), cos(state.z));
+
+    float SigmaN;
+    float DeltaN;
+    float PN;
+    float RN;
+    float ThetaN;
+    kerr_invariants(state.x, state.y, Lz, Q, rs, a, SigmaN, DeltaN, PN, RN, ThetaN);
+
+    const float TURN_EPS = 1e-6;
+    if (RN < -TURN_EPS) {
+        signs.x *= -1.0;
+    }
+    if (ThetaN < -TURN_EPS) {
+        signs.y *= -1.0;
+    }
+}
+
+vec3 trace_black_hole(vec3 origin, vec3 ray_dir) {
+    float rs = u_black_hole_radius;
+    float M = 0.5 * rs;
+    float spin_star = clamp(u_black_hole_spin, -0.999, 0.999);
+    float a = spin_star * M;
+
+    // Default to stable approximation unless full Kerr is explicitly enabled.
+    if (u_use_full_kerr == 0 || abs(a) < 1e-6) {
+        return trace_black_hole_approx(origin, ray_dir);
+    }
+
+    vec4 state;
+    vec2 signs;
+    float Lz = 0.0;
+    float Q = 0.0;
+    if (!init_kerr_ray(origin, ray_dir, rs, a, state, signs, Lz, Q)) {
+        return trace_black_hole_approx(origin, ray_dir);
+    }
+
+    float horizon = kerr_horizon_radius(rs, a);
+    float horizon_guard = horizon + 0.02 * rs;
+    vec3 accum = vec3(0.0);
+    vec3 pos = origin;
+    vec3 dir = normalize(ray_dir);
+    float closest_r = length(pos);
+
+    for (int i = 0; i < MAX_STEPS; i++) {
+        if (i >= u_max_steps) {
+            break;
+        }
+
+        vec3 pos_kerr = bl_to_cart_y_axis(state.x, state.y, state.z, a);
+        pos = kerr_to_world(pos_kerr);
+        float cart_r = length(pos);
+        closest_r = min(closest_r, cart_r);
+
+        if (state.x <= horizon_guard) {
+            return accum;
+        }
+        if (cart_r > u_far_distance) {
+            break;
+        }
+
+        float local_step = adaptive_step_size(state.x, rs);
+        float near_horizon_scale = clamp((state.x - horizon_guard) / max(0.7 * rs, 1e-4), 0.08, 1.0);
+        local_step *= near_horizon_scale;
+        int sub_steps = 1;
+        if (state.x < rs * 5.0) {
+            sub_steps = 4;
+        } else if (state.x < rs * 8.0) {
+            sub_steps = 3;
+        } else if (state.x < rs * 20.0) {
+            sub_steps = 2;
+        }
+        float target_arc_step = local_step / float(sub_steps);
+        bool stop_trace = false;
+
+        for (int sub = 0; sub < 3; sub++) {
+            if (sub >= sub_steps) {
+                break;
+            }
+
+            vec3 prev_pos = pos;
+            vec4 deriv_probe;
+            float R_probe;
+            float Theta_probe;
+            kerr_derivatives(state, signs, Lz, Q, rs, a, deriv_probe, R_probe, Theta_probe);
+            vec3 basis_r;
+            vec3 basis_theta;
+            vec3 basis_phi;
+            bl_basis_y_axis(state.x, state.y, state.z, a, basis_r, basis_theta, basis_phi);
+            vec3 cart_vel =
+                deriv_probe.x * basis_r
+                + deriv_probe.y * basis_theta
+                + deriv_probe.z * basis_phi;
+            float speed_cart = max(length(cart_vel), 1e-4);
+            float h_arc = target_arc_step / speed_cart;
+            float h_phi = 0.20 / max(abs(deriv_probe.z), 1e-4);
+            float h_theta = 0.16 / max(abs(deriv_probe.y), 1e-4);
+            float h_r = 0.28 / max(abs(deriv_probe.x), 1e-4);
+            float h_limit = min(h_phi, min(h_theta, h_r));
+            float h_step = min(h_arc, h_limit);
+            h_step = clamp(h_step, h_arc * 0.04, h_arc);
+
+            advance_kerr_ray(state, signs, Lz, Q, rs, a, h_step);
+            pos_kerr = bl_to_cart_y_axis(state.x, state.y, state.z, a);
+            pos = kerr_to_world(pos_kerr);
+
+            vec3 seg = pos - prev_pos;
+            float seg_len = length(seg);
+            if (seg_len > 1e-6) {
+                dir = seg / seg_len;
+            }
+            closest_r = min(closest_r, length(pos));
+
+            if (u_show_grid == 1) {
+                float prev_d = prev_pos.y - well_surface_y(prev_pos.xz, rs);
+                float curr_d = pos.y - well_surface_y(pos.xz, rs);
+                bool crossed_well = (prev_d <= 0.0 && curr_d > 0.0) || (prev_d >= 0.0 && curr_d < 0.0);
+                if (crossed_well) {
+                    float denom = prev_d - curr_d;
+                    float t = abs(denom) > 1e-5 ? prev_d / denom : 0.0;
+                    t = clamp(t, 0.0, 1.0);
+                    vec3 hit = mix(prev_pos, pos, t);
+
+                    float hit_r = length(hit.xz);
+                    if (hit_r > rs * 1.08 && hit_r < u_grid_extent) {
+                        vec3 emit = well_grid_emission(hit, dir, rs);
+                        accum += emit;
+                    }
+                }
+            }
+
+            float disk_h = max(u_disk_half_thickness, 1e-4);
+            float y0 = prev_pos.y;
+            float y1 = pos.y;
+            float dy = y1 - y0;
+
+            float t0 = 0.0;
+            float t1 = 1.0;
+            bool slab_hit = false;
+            if (abs(dy) < 1e-6) {
+                slab_hit = abs(y0) <= disk_h;
+            } else {
+                float ta = (-disk_h - y0) / dy;
+                float tb = (disk_h - y0) / dy;
+                t0 = max(0.0, min(ta, tb));
+                t1 = min(1.0, max(ta, tb));
+                slab_hit = t1 >= t0;
+            }
+
+            if (slab_hit) {
+                float t_mid = 0.5 * (t0 + t1);
+                vec3 hit = mix(prev_pos, pos, t_mid);
+                float disk_r = length(hit.xz);
+                if (disk_r > u_disk_inner_radius && disk_r < u_disk_outer_radius) {
+                    float path_frac = max(0.0, t1 - t0);
+                    float volume_weight = clamp(path_frac * seg_len / max(disk_h * 0.75, 1e-4), 0.0, 1.4);
+                    vec3 emit = disk_emission(hit, dir, rs);
+                    accum += emit * volume_weight;
+                }
+            }
+
+            float sun_t = 0.0;
+            if (u_sun_intensity > 0.001
+                && intersect_sphere_segment(prev_pos, pos, u_sun_position, u_sun_radius, sun_t)) {
+                vec3 sun_hit = mix(prev_pos, pos, sun_t);
+                accum += sun_emission(sun_hit);
+                return accum;
+            }
+
+            if (length(pos) > u_far_distance) {
+                stop_trace = true;
+                break;
+            }
+            if (state.x <= horizon_guard) {
+                return accum;
+            }
+        }
+
         if (stop_trace) {
             break;
         }

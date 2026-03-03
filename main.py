@@ -45,6 +45,7 @@ class BlackHoleSim(WindowConfig):
         self.black_hole_radius = 1.0
         self.spinning_mode = False
         self.black_hole_spin = 0.38
+        self.use_full_kerr = False
         self.disk_inner_radius = 1.58
         self.disk_outer_radius = 6.95
         self.disk_half_thickness = 0.17
@@ -82,6 +83,7 @@ class BlackHoleSim(WindowConfig):
         print("  Mouse wheel: zoom")
         print("  1/2/3: quality preset")
         print("  B: toggle spinning black hole mode")
+        print("  K: toggle full Kerr solver (experimental)")
         print("  G: toggle gravity well grid")
         print("  V: toggle voxel mode")
         print("  Space: pause time")
@@ -195,6 +197,7 @@ class BlackHoleSim(WindowConfig):
             "u_black_hole_spin",
             self.black_hole_spin if self.spinning_mode else 0.0
         )
+        self._set_uniform("u_use_full_kerr", int(self.use_full_kerr))
         self._set_uniform("u_disk_inner_radius", self.disk_inner_radius)
         self._set_uniform("u_disk_outer_radius", self.disk_outer_radius)
         self._set_uniform("u_disk_half_thickness", self.disk_half_thickness)
@@ -271,6 +274,16 @@ class BlackHoleSim(WindowConfig):
                 "Black hole mode: spinning"
                 if self.spinning_mode
                 else "Black hole mode: static"
+            )
+            return
+
+        k_keys = self._key_candidates("K", fallback=ord("k"))
+        if key in k_keys:
+            self.use_full_kerr = not self.use_full_kerr
+            print(
+                "Geodesic solver: full Kerr (experimental)"
+                if self.use_full_kerr
+                else "Geodesic solver: stable approximation"
             )
             return
 
