@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+from typing import Any, SupportsInt, cast
 
 import moderngl
 import moderngl_window as mglw
@@ -90,12 +91,16 @@ class BlackHoleSim(mglw.WindowConfig):
         press = getattr(keys, "ACTION_PRESS", None)
         if action == press:
             return True
-        if str(action).upper() == "ACTION_PRESS":
+        if isinstance(action, str) and action.upper() == "ACTION_PRESS":
             return True
-        try:
-            return int(action) == 1
-        except (TypeError, ValueError):
-            return False
+        if isinstance(action, int):
+            return action == 1
+        if isinstance(action, SupportsInt):
+            try:
+                return int(cast(SupportsInt, action)) == 1
+            except (TypeError, ValueError):
+                return False
+        return False
 
     def _key_candidates(self, *names: str, fallback: int | None = None) -> tuple[object, ...]:
         keys = self.wnd.keys
@@ -118,6 +123,10 @@ class BlackHoleSim(mglw.WindowConfig):
             f"Quality preset: {self.quality_name} "
             f"(step_size={self.step_size}, max_steps={self.max_steps})"
         )
+
+    def _set_uniform(self, name: str, value: Any) -> None:
+        # moderngl Program indexing is dynamically typed; cast to Any for static checkers.
+        cast(Any, self.program[name]).value = value
 
     def _distance_budget(self) -> tuple[float, int]:
         base_far = self.far_distance
@@ -170,42 +179,43 @@ class BlackHoleSim(mglw.WindowConfig):
         self.ctx.viewport = (0, 0, width, height)
         self.ctx.disable(moderngl.DEPTH_TEST)
 
-        self.program["u_resolution"].value = (float(width), float(height))
+        self._set_uniform("u_resolution", (float(width), float(height)))
         try:
-            self.program["u_time"].value = self._time
+            self._set_uniform("u_time", self._time)
         except KeyError:
             pass
-        self.program["u_cam_pos"].value = tuple(float(v) for v in camera_pos)
-        self.program["u_cam_forward"].value = tuple(float(v) for v in forward)
-        self.program["u_cam_right"].value = tuple(float(v) for v in right)
-        self.program["u_cam_up"].value = tuple(float(v) for v in up)
-        self.program["u_fov_y"].value = self.fov_y
-        self.program["u_black_hole_radius"].value = self.black_hole_radius
-        self.program["u_black_hole_spin"].value = (
+        self._set_uniform("u_cam_pos", tuple(float(v) for v in camera_pos))
+        self._set_uniform("u_cam_forward", tuple(float(v) for v in forward))
+        self._set_uniform("u_cam_right", tuple(float(v) for v in right))
+        self._set_uniform("u_cam_up", tuple(float(v) for v in up))
+        self._set_uniform("u_fov_y", self.fov_y)
+        self._set_uniform("u_black_hole_radius", self.black_hole_radius)
+        self._set_uniform(
+            "u_black_hole_spin",
             self.black_hole_spin if self.spinning_mode else 0.0
         )
-        self.program["u_disk_inner_radius"].value = self.disk_inner_radius
-        self.program["u_disk_outer_radius"].value = self.disk_outer_radius
-        self.program["u_disk_half_thickness"].value = self.disk_half_thickness
+        self._set_uniform("u_disk_inner_radius", self.disk_inner_radius)
+        self._set_uniform("u_disk_outer_radius", self.disk_outer_radius)
+        self._set_uniform("u_disk_half_thickness", self.disk_half_thickness)
 
-        self.program["u_step_size"].value = self.step_size
+        self._set_uniform("u_step_size", self.step_size)
         far_distance, max_steps = self._distance_budget()
-        self.program["u_max_steps"].value = max_steps
-        self.program["u_exposure"].value = self.exposure
-        self.program["u_far_distance"].value = far_distance
-        self.program["u_show_grid"].value = int(self.show_grid)
-        self.program["u_grid_height"].value = self.grid_height
-        self.program["u_grid_depth"].value = self.grid_depth
-        self.program["u_grid_extent"].value = self.grid_extent
-        self.program["u_grid_spacing"].value = self.grid_spacing
-        self.program["u_grid_line_width"].value = self.grid_line_width
-        self.program["u_grid_glow"].value = self.grid_glow
-        self.program["u_sun_position"].value = tuple(float(v) for v in self.sun_position)
-        self.program["u_sun_radius"].value = self.sun_radius
-        self.program["u_sun_color"].value = tuple(float(v) for v in self.sun_color)
-        self.program["u_sun_intensity"].value = self.sun_intensity
-        self.program["u_voxel_mode"].value = int(self.voxel_mode)
-        self.program["u_voxel_size"].value = self.voxel_size
+        self._set_uniform("u_max_steps", max_steps)
+        self._set_uniform("u_exposure", self.exposure)
+        self._set_uniform("u_far_distance", far_distance)
+        self._set_uniform("u_show_grid", int(self.show_grid))
+        self._set_uniform("u_grid_height", self.grid_height)
+        self._set_uniform("u_grid_depth", self.grid_depth)
+        self._set_uniform("u_grid_extent", self.grid_extent)
+        self._set_uniform("u_grid_spacing", self.grid_spacing)
+        self._set_uniform("u_grid_line_width", self.grid_line_width)
+        self._set_uniform("u_grid_glow", self.grid_glow)
+        self._set_uniform("u_sun_position", tuple(float(v) for v in self.sun_position))
+        self._set_uniform("u_sun_radius", self.sun_radius)
+        self._set_uniform("u_sun_color", tuple(float(v) for v in self.sun_color))
+        self._set_uniform("u_sun_intensity", self.sun_intensity)
+        self._set_uniform("u_voxel_mode", int(self.voxel_mode))
+        self._set_uniform("u_voxel_size", self.voxel_size)
 
         self.quad.render(mode=moderngl.TRIANGLES, vertices=3)
 
