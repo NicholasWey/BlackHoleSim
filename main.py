@@ -6,6 +6,7 @@ from typing import Any, SupportsInt, cast
 
 import moderngl
 import moderngl_window as mglw
+from moderngl_window.context.base import WindowConfig
 import numpy as np
 
 
@@ -16,7 +17,7 @@ def normalize(v: np.ndarray) -> np.ndarray:
     return v / length
 
 
-class BlackHoleSim(mglw.WindowConfig):
+class BlackHoleSim(WindowConfig):
     gl_version = (3, 3)
     title = "Black Hole Sim (GPU Raytracing)"
     window_size = (1600, 900)
