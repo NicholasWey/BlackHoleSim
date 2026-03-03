@@ -42,27 +42,27 @@ class BlackHoleSim(mglw.WindowConfig):
 
         self.black_hole_radius = 1.0
         self.spinning_mode = False
-        self.black_hole_spin = 0.50
-        self.disk_inner_radius = 1.65
-        self.disk_outer_radius = 7.25
-        self.disk_half_thickness = 0.2
-        self.exposure = 1.3
+        self.black_hole_spin = 0.38
+        self.disk_inner_radius = 1.58
+        self.disk_outer_radius = 6.95
+        self.disk_half_thickness = 0.17
+        self.exposure = 1.52
         self.far_distance = 2200.0
         self.zoom_far_distance_scale = 34.0
         self.max_ray_steps_cap = 3072
-        self.show_grid = True
+        self.show_grid = False
         self.grid_height = -2.9
         self.grid_depth = 20.0
         self.grid_extent = 52.0
         self.grid_spacing = 1.6
         self.grid_line_width = 0.055
         self.grid_glow = 2.15
-        self.sun_position = np.array([36.0, 4.0, 36.0], dtype=np.float32)
-        self.sun_radius = 4.8
-        self.sun_color = np.array([1.0, 0.14, 0.06], dtype=np.float32)
-        self.sun_intensity = 18.0
+        self.sun_position = np.array([22.0, 10.0, 13.0], dtype=np.float32)
+        self.sun_radius = 5.2
+        self.sun_color = np.array([1.0, 0.68, 0.84], dtype=np.float32)
+        self.sun_intensity = 7.4
         self.voxel_mode = False
-        self.voxel_size = 0.2
+        self.voxel_size = 0.28
 
         self._time = 0.0
         self._paused = False

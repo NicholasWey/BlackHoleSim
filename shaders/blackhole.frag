@@ -36,9 +36,65 @@ uniform float u_voxel_size;
 
 const float PI = 3.14159265359;
 const int MAX_STEPS = 4096;
+const int PIXEL_PALETTE_SIZE = 8;
+const vec3 PIXEL_PALETTE[PIXEL_PALETTE_SIZE] = vec3[](
+    vec3(0.050, 0.016, 0.145),
+    vec3(0.102, 0.043, 0.247),
+    vec3(0.196, 0.078, 0.353),
+    vec3(0.420, 0.129, 0.486),
+    vec3(0.729, 0.219, 0.580),
+    vec3(0.965, 0.438, 0.700),
+    vec3(1.000, 0.774, 0.620),
+    vec3(1.000, 0.949, 0.865)
+);
 
 float hash21(vec2 p) {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+
+float hash31(vec3 p) {
+    return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453123);
+}
+
+float pixel_screen_size() {
+    return 6.0;
+}
+
+vec3 nearest_pixel_color(vec3 c) {
+    vec3 best = PIXEL_PALETTE[0];
+    float best_d = 1e9;
+    for (int i = 0; i < PIXEL_PALETTE_SIZE; i++) {
+        vec3 p = PIXEL_PALETTE[i];
+        vec3 d = (c - p) * vec3(1.0, 0.9, 1.1);
+        float dist = dot(d, d);
+        if (dist < best_d) {
+            best_d = dist;
+            best = p;
+        }
+    }
+    return best;
+}
+
+vec3 banded_pixel_color(float t) {
+    if (t > 0.88) {
+        return PIXEL_PALETTE[7];
+    }
+    if (t > 0.72) {
+        return PIXEL_PALETTE[6];
+    }
+    if (t > 0.55) {
+        return PIXEL_PALETTE[5];
+    }
+    if (t > 0.38) {
+        return PIXEL_PALETTE[4];
+    }
+    if (t > 0.24) {
+        return PIXEL_PALETTE[3];
+    }
+    if (t > 0.12) {
+        return PIXEL_PALETTE[2];
+    }
+    return PIXEL_PALETTE[1];
 }
 
 float value_noise(vec2 p) {
@@ -54,6 +110,75 @@ float value_noise(vec2 p) {
     float x0 = mix(a, b, f.x);
     float x1 = mix(c, d, f.x);
     return mix(x0, x1, f.y);
+}
+
+vec2 sky_uv(vec3 dir) {
+    float phi = atan(dir.z, dir.x);
+    float theta = acos(clamp(dir.y, -1.0, 1.0));
+    return vec2(phi / (2.0 * PI) + 0.5, theta / PI);
+}
+
+float star_layer(vec3 dir, float scale, float threshold) {
+    vec3 p = floor((dir * 0.5 + 0.5) * scale);
+    float n = hash31(p);
+    float s = smoothstep(threshold, 1.0, n);
+    return pow(s, 10.0);
+}
+
+vec3 space_background(vec3 dir) {
+    vec2 uv = sky_uv(dir);
+    if (u_voxel_mode == 1) {
+        float cell = 0.0080 * pixel_screen_size();
+        vec2 uv_cell = floor(uv / cell);
+        vec2 uv_local = abs(fract(uv / cell) - 0.5);
+
+        float neb_a = value_noise(uv_cell * 0.065);
+        float neb_b = value_noise(uv_cell * 0.120 + vec2(41.0, 17.0));
+        float neb = smoothstep(0.56, 0.90, 0.62 * neb_a + 0.38 * neb_b);
+        vec3 color = mix(PIXEL_PALETTE[0], PIXEL_PALETTE[1], neb * 0.72);
+
+        float cloud_seed = value_noise(uv_cell * vec2(0.11, 0.32) + vec2(13.0, -9.0));
+        float cloud = smoothstep(0.74, 0.95, cloud_seed) * 0.45;
+        color = mix(color, PIXEL_PALETTE[2], cloud);
+
+        float star_seed = hash21(uv_cell + 19.0);
+        float star = step(0.9970, star_seed);
+        float big_seed = hash21(uv_cell * 0.37 + 83.0);
+        float big_star = step(0.9988, big_seed);
+        float cross = max(1.0 - step(0.15, uv_local.x), 1.0 - step(0.15, uv_local.y));
+        float sparkle = max(star, big_star * cross);
+
+        vec3 star_col = mix(PIXEL_PALETTE[5], PIXEL_PALETTE[7], hash21(uv_cell * 1.9 + 5.0));
+        color += sparkle * star_col * (1.0 + 0.45 * big_star);
+
+        float sky_grad = clamp(0.5 + 0.5 * dir.y, 0.0, 1.0);
+        color = mix(color * 0.90, color * 1.08, sky_grad);
+        return nearest_pixel_color(color);
+    }
+
+    float n0 = value_noise(uv * vec2(16.0, 8.0) + vec2(0.0, u_time * 0.014));
+    float n1 = value_noise(uv * vec2(30.0, 15.0) - vec2(u_time * 0.010, 0.0));
+    float nebula = smoothstep(0.28, 0.88, 0.62 * n0 + 0.38 * n1);
+
+    vec3 deep = vec3(0.020, 0.008, 0.058);
+    vec3 haze = vec3(0.235, 0.055, 0.255);
+    vec3 color = mix(deep, haze, nebula * 0.44);
+
+    float horizon = clamp(0.5 + 0.5 * dir.y, 0.0, 1.0);
+    color *= mix(0.84, 1.08, pow(horizon, 0.9));
+
+    float stars = 0.0;
+    stars += 1.12 * star_layer(dir, 230.0, 0.9968);
+    stars += 0.85 * star_layer(normalize(dir + vec3(0.31, -0.22, 0.17)), 520.0, 0.9989);
+
+    float hue_pick = hash31(floor((dir * 0.5 + 0.5) * 390.0));
+    vec3 warm_star = vec3(1.00, 0.77, 0.90);
+    vec3 pale_star = vec3(1.00, 0.97, 0.93);
+    vec3 star_col = mix(warm_star, pale_star, smoothstep(0.12, 0.95, hue_pick));
+
+    float twinkle = 0.90 + 0.10 * sin(u_time * 3.0 + dot(dir, vec3(12.7, 8.1, 19.2)));
+    color += stars * twinkle * star_col;
+    return color;
 }
 
 float voxel_cell_size() {
@@ -135,11 +260,16 @@ vec3 sun_emission(vec3 hit_pos) {
 
     float gran_scale = u_voxel_mode == 1 ? 9.0 : 18.0;
     float gran = value_noise(n.xz * gran_scale + n.y * (gran_scale * 0.6));
-    vec3 core = mix(vec3(1.0, 0.82, 0.56), u_sun_color, 0.78);
-    vec3 surface = core * (0.95 + 0.10 * gran);
+    vec3 core = mix(vec3(1.0, 0.92, 0.88), u_sun_color, 0.80);
+    vec3 surface = core * (0.93 + 0.14 * gran);
     vec3 col = surface * u_sun_intensity;
     if (u_voxel_mode == 1) {
-        col = voxel_palette(col, 7.0);
+        float edge = clamp(length(sample_hit - u_sun_position) / max(u_sun_radius, 1e-4), 0.0, 1.0);
+        float edge_band = floor(edge * 4.0 + 0.5) / 4.0;
+        vec3 sun_col = mix(PIXEL_PALETTE[7], PIXEL_PALETTE[6], edge_band);
+        float sparkle = step(0.76, gran);
+        col = sun_col * (0.36 * u_sun_intensity) * (1.0 + 0.25 * sparkle);
+        col = nearest_pixel_color(col);
     }
     return col;
 }
@@ -160,17 +290,49 @@ vec3 disk_emission(vec3 hit_pos, vec3 view_dir, float rs) {
     float r = length(sample_hit.xz);
     float t = clamp((r - u_disk_inner_radius) / (u_disk_outer_radius - u_disk_inner_radius), 0.0, 1.0);
 
-    vec3 hot = vec3(1.0, 0.94, 0.84);
-    vec3 warm = vec3(1.0, 0.52, 0.14);
-    vec3 cool = vec3(0.82, 0.12, 0.02);
-    vec3 base_col = mix(hot, warm, smoothstep(0.0, 0.36, t));
-    base_col = mix(base_col, cool, smoothstep(0.36, 1.0, t));
+    if (u_voxel_mode == 1) {
+        float h = max(u_disk_half_thickness, 1e-4);
+        float y_norm = abs(sample_hit.y) / h;
+        float slab = 1.0 - step(1.0, y_norm);
+        if (slab <= 0.0) {
+            return vec3(0.0);
+        }
+
+        float band_t = floor(t * 5.0 + 0.5) / 5.0;
+        vec3 base_col = banded_pixel_color(1.0 - band_t * 0.95);
+
+        float beta = sqrt(clamp(rs / (2.0 * max(r, rs * 1.02)), 0.0, 0.35));
+        vec3 tangent = normalize(vec3(-sample_hit.z, 0.0, sample_hit.x));
+        vec3 vel = tangent * beta;
+        float gamma = inversesqrt(max(1e-4, 1.0 - dot(vel, vel)));
+        float doppler = 1.0 / (gamma * (1.0 - dot(vel, -view_dir)));
+        float doppler_q = floor(clamp(doppler, 0.55, 2.2) * 3.0) / 3.0;
+
+        float grav = sqrt(max(0.03, 1.0 - rs / max(r, rs * 1.01)));
+        float emit_band = floor((mix(4.8, 0.9, band_t) * 2.0) + 0.5) / 2.0;
+        float gain = emit_band * grav * pow(max(0.45, doppler_q), 2.2) * slab;
+
+        vec3 col = base_col * gain;
+        float inner = exp(-pow((r - u_disk_inner_radius) / max(0.12, u_disk_inner_radius * 0.18), 2.0));
+        float inner_q = floor(inner * 4.0 + 0.5) / 4.0;
+        col += PIXEL_PALETTE[7] * inner_q * 1.05;
+        return nearest_pixel_color(col);
+    }
+
+    vec3 hot = vec3(1.0, 0.95, 0.89);
+    vec3 warm = vec3(1.0, 0.53, 0.78);
+    vec3 cool = vec3(0.54, 0.16, 0.55);
+    vec3 base_col = mix(hot, warm, smoothstep(0.0, 0.34, t));
+    base_col = mix(base_col, cool, smoothstep(0.34, 1.0, t));
 
     float grain = disk_grain(sample_hit.xz);
     float h = max(u_disk_half_thickness, 1e-4);
     float y_norm = abs(sample_hit.y) / h;
-    float vertical = exp(-2.6 * y_norm * y_norm);
-    float emissive = mix(3.6, 0.55, t) * (0.92 + 0.16 * grain) * vertical;
+    float vertical = exp(-2.2 * y_norm * y_norm);
+    float emissive = mix(4.6, 0.72, t) * (0.90 + 0.18 * grain) * vertical;
+
+    float swirl = 0.5 + 0.5 * sin(atan(sample_hit.z, sample_hit.x) * 3.2 - u_time * 0.55 + grain * 3.1);
+    base_col *= mix(0.90, 1.18, swirl);
 
     float beta = sqrt(clamp(rs / (2.0 * max(r, rs * 1.02)), 0.0, 0.35));
     vec3 tangent = normalize(vec3(-sample_hit.z, 0.0, sample_hit.x));
@@ -180,9 +342,11 @@ vec3 disk_emission(vec3 hit_pos, vec3 view_dir, float rs) {
     doppler = clamp(doppler, 0.28, 2.6);
 
     float grav = sqrt(max(0.015, 1.0 - rs / max(r, rs * 1.01)));
-    float gain = emissive * grav * pow(doppler, 3.0);
+    float gain = emissive * grav * pow(doppler, 2.8);
 
     vec3 col = base_col * gain;
+    float edge_glow = exp(-pow((r - u_disk_inner_radius) / max(0.7, u_disk_inner_radius * 0.42), 2.0));
+    col += vec3(1.0, 0.72, 0.88) * edge_glow * 0.44 * vertical;
     if (u_voxel_mode == 1) {
         col = voxel_palette(col, 6.0);
     }
@@ -307,8 +471,8 @@ vec3 well_grid_emission(vec3 hit_pos, vec3 view_dir, float rs) {
     float horizon_fade = 0.45 + 0.55 * (1.0 - smoothstep(u_grid_extent * 0.92, u_grid_extent, r));
     float grav = sqrt(max(0.06, 1.0 - rs / max(r, rs * 1.01)));
 
-    vec3 inner = vec3(0.24, 0.95, 1.0);
-    vec3 outer = vec3(0.05, 0.22, 0.38);
+    vec3 inner = vec3(1.0, 0.58, 0.86);
+    vec3 outer = vec3(0.16, 0.06, 0.23);
     vec3 base_col = mix(inner, outer, smoothstep(rs * 1.4, u_grid_extent, r));
     if (u_voxel_mode == 1) {
         base_col = voxel_palette(base_col, 6.0);
@@ -323,6 +487,7 @@ vec3 trace_black_hole(vec3 origin, vec3 ray_dir) {
     vec3 dir = normalize(ray_dir);
     vec3 accum = vec3(0.0);
     float rs = u_black_hole_radius;
+    float closest_r = length(pos);
 
     for (int i = 0; i < MAX_STEPS; i++) {
         if (i >= u_max_steps) {
@@ -330,6 +495,7 @@ vec3 trace_black_hole(vec3 origin, vec3 ray_dir) {
         }
 
         float r = length(pos);
+        closest_r = min(closest_r, r);
         if (r <= rs) {
             return accum;
         }
@@ -361,6 +527,7 @@ vec3 trace_black_hole(vec3 origin, vec3 ray_dir) {
 
             dir = normalize(dir + accel_mid * dt);
             pos += dir_mid * dt;
+            closest_r = min(closest_r, length(pos));
 
             if (u_show_grid == 1) {
                 float prev_d = prev_pos.y - well_surface_y(prev_pos.xz, rs);
@@ -412,7 +579,8 @@ vec3 trace_black_hole(vec3 origin, vec3 ray_dir) {
             }
 
             float sun_t = 0.0;
-            if (intersect_sphere_segment(prev_pos, pos, u_sun_position, u_sun_radius, sun_t)) {
+            if (u_sun_intensity > 0.001
+                && intersect_sphere_segment(prev_pos, pos, u_sun_position, u_sun_radius, sun_t)) {
                 vec3 sun_hit = mix(prev_pos, pos, sun_t);
                 accum += sun_emission(sun_hit);
                 return accum;
@@ -431,11 +599,40 @@ vec3 trace_black_hole(vec3 origin, vec3 ray_dir) {
         }
     }
 
+    if (u_voxel_mode == 1) {
+        vec3 bg = space_background(dir);
+        float lens = 1.0 - smoothstep(rs * 2.0, rs * 10.0, closest_r);
+        lens = floor(lens * 5.0 + 0.5) / 5.0;
+
+        float ring_mix = clamp((closest_r - rs) / max(rs * 5.0, 1e-4), 0.0, 1.0);
+        ring_mix = floor(ring_mix * 5.0 + 0.5) / 5.0;
+        vec3 ring_tint = banded_pixel_color(1.0 - ring_mix * 0.90);
+
+        bg *= mix(1.0, 0.35, lens);
+        accum += bg;
+        accum += ring_tint * lens * 0.95;
+        return accum;
+    }
+
+    vec3 bg = space_background(dir);
+    float lens = 1.0 - smoothstep(rs * 2.0, rs * 11.0, closest_r);
+    float ring_mix = clamp((closest_r - rs) / max(rs * 5.0, 1e-4), 0.0, 1.0);
+    vec3 ring_tint = mix(vec3(1.0, 0.94, 0.88), vec3(1.0, 0.35, 0.72), ring_mix);
+    bg *= mix(1.0, 0.44, lens * 0.82);
+    accum += bg;
+    accum += ring_tint * pow(lens, 2.1) * 0.78;
+
     return accum;
 }
 
 void main() {
-    vec2 ndc = (gl_FragCoord.xy / u_resolution) * 2.0 - 1.0;
+    vec2 sample_coord = gl_FragCoord.xy;
+    if (u_voxel_mode == 1) {
+        float pixel = pixel_screen_size();
+        sample_coord = (floor(sample_coord / pixel) + 0.5) * pixel;
+    }
+
+    vec2 ndc = (sample_coord / u_resolution) * 2.0 - 1.0;
     ndc.x *= u_resolution.x / u_resolution.y;
 
     float tan_half_fov = tan(0.5 * u_fov_y);
@@ -445,9 +642,21 @@ void main() {
         + ndc.y * tan_half_fov * u_cam_up
     );
 
-    vec3 color = trace_black_hole(u_cam_pos, ray_dir);
-    color = vec3(1.0) - exp(-color * u_exposure);
+    vec3 scene = trace_black_hole(u_cam_pos, ray_dir);
+    vec3 color = vec3(1.0) - exp(-scene * u_exposure);
     color = pow(color, vec3(1.0 / 2.2));
+
+    if (u_voxel_mode == 1) {
+        color = clamp(color, 0.0, 1.0);
+        color = nearest_pixel_color(color);
+    } else {
+        float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+        color = mix(vec3(luma), color, 1.08);
+
+        float vignette = 1.0 - smoothstep(0.32, 1.20, dot(ndc, ndc));
+        color *= 0.80 + 0.20 * vignette;
+        color = clamp(color, 0.0, 1.0);
+    }
 
     fragColor = vec4(color, 1.0);
 }
