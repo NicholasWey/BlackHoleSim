@@ -54,7 +54,7 @@ class BlackHoleSim(WindowConfig):
         self.max_ray_steps_cap = 3072
         self.show_grid = False
         self.grid_height = -2.9
-        self.grid_depth = 20.0
+        self.grid_depth = 50.0
         self.grid_extent = 52.0
         self.grid_spacing = 1.6
         self.grid_line_width = 0.055
